@@ -1,0 +1,6 @@
+BenchmarkTurbine	1	2564039700 ns/op
+BenchmarkTimeAfter	1	7938361400 ns/op
+BenchmarkTurbine	1	2304765900 ns/op
+BenchmarkTimeAfter	1	4582974800 ns/op
+BenchmarkTurbine	1	4711933100 ns/op
+BenchmarkTimeAfter	1	5671896200 ns/op
