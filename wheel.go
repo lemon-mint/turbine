@@ -36,10 +36,13 @@ func (b *blade) load(f func()) {
 	b.mu.Unlock()
 }
 
-func NewTurbine(unit time.Duration, size int) *Turbine {
+// NewTurbine creates a new Turbine with the given number of blades.
+//
+// Max Schedulable Time: (blades - 1) * unit
+func NewTurbine(unit time.Duration, blades int) *Turbine {
 	return &Turbine{
 		unit:   unit,
-		blades: make([]blade, size),
+		blades: make([]blade, blades),
 	}
 }
 
