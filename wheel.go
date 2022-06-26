@@ -77,12 +77,17 @@ func NewTurbine(unit time.Duration, blades int) *Turbine {
 	return &Turbine{
 		unit:   unit,
 		blades: make([]blade, blades),
+		state:  TurbineStateStopped,
 	}
 }
 
 var ErrOutOfRange = errors.New("out of range")
 
 func (t *Turbine) Schedule(after time.Duration, f func()) error {
+	if after < t.unit {
+		return ErrOutOfRange
+	}
+
 	if after > t.unit*time.Duration(len(t.blades)-1) {
 		return ErrOutOfRange
 	}
