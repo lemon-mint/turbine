@@ -16,16 +16,16 @@ const (
 )
 
 type Turbine struct {
+	stopChan chan struct{}
+
 	blades       []blade
 	cursor       uint64
 	tasksCounter uint64
 
+	TaskRunner func(f func())
+
 	unit  time.Duration
 	state TurbineState
-
-	stopChan chan struct{}
-
-	TaskRunner func(f func())
 }
 
 func (t *Turbine) getState() TurbineState {
@@ -47,12 +47,26 @@ func (t *Turbine) loadCursor() uint64 {
 type blade struct {
 	mu sync.Mutex
 
-	tasks []func()
+	tasks []task
 }
 
-func (b *blade) load(f func()) {
+type taskType uint8
+
+const (
+	taskTypeAfter = iota
+	taskTypePeriodic
+)
+
+type task struct {
+	t  int64 // time.Now().UnixNano()
+	fn func()
+
+	tt taskType
+}
+
+func (b *blade) load(t task) {
 	b.mu.Lock()
-	b.tasks = append(b.tasks, f)
+	b.tasks = append(b.tasks, t)
 	b.mu.Unlock()
 }
 
@@ -75,7 +89,12 @@ func (t *Turbine) Schedule(after time.Duration, f func()) error {
 
 	atomic.AddUint64(&t.tasksCounter, 1)
 	targetBlade := int(t.loadCursor()+uint64(after/t.unit)) % len(t.blades)
-	t.blades[targetBlade].load(f)
+	at := task{
+		t:  time.Now().UnixNano(),
+		fn: f,
+		tt: taskTypeAfter,
+	}
+	t.blades[targetBlade].load(at)
 
 	return nil
 }
@@ -85,9 +104,6 @@ var ErrTurbineAlreadyRunning = errors.New("turbine already running")
 func (t *Turbine) Start() error {
 	if !t.casState(TurbineStateStopped, TurbineStateRunning) {
 		return ErrTurbineAlreadyRunning
-	}
-	if t.TaskRunner == nil {
-		t.TaskRunner = func(f func()) { f() }
 	}
 	t.stopChan = make(chan struct{})
 	go t.worker()
@@ -109,9 +125,12 @@ func (t *Turbine) Stop() error {
 
 func (t *Turbine) worker() {
 	ticker := time.NewTicker(t.unit)
-	defer ticker.Stop()
-	defer close(t.stopChan)
-	defer t.setState(TurbineStateStopped)
+	defer func() {
+		ticker.Stop()
+		close(t.stopChan)
+		t.stopChan = nil
+		t.setState(TurbineStateStopped)
+	}()
 
 	for {
 		select {
@@ -119,14 +138,29 @@ func (t *Turbine) worker() {
 			t.setState(TurbineStateStopped)
 			return
 		case <-ticker.C:
-			cursor := atomic.AddUint64(&t.cursor, 1)
-			t.blades[cursor].mu.Lock()
-			for i := range t.blades[cursor].tasks {
-				t.TaskRunner(t.blades[cursor].tasks[i])
-			}
-			atomic.AddUint64(&t.tasksCounter, ^uint64(len(t.blades[cursor].tasks)-1))
-			t.blades[cursor].tasks = t.blades[cursor].tasks[:0]
-			t.blades[cursor].mu.Unlock()
+			t.update()
 		}
 	}
+}
+
+func (t *Turbine) update() {
+	cursor := atomic.AddUint64(&t.cursor, 1)
+	t.blades[cursor].mu.Lock()
+	tasks := t.blades[cursor].tasks
+	if t.TaskRunner == nil {
+		for i := range tasks {
+			tasks[i].fn()
+		}
+	} else {
+		for i := range tasks {
+			t.TaskRunner(tasks[i].fn)
+		}
+	}
+	atomic.AddUint64(&t.tasksCounter, ^uint64(len(t.blades[cursor].tasks)-1))
+	t.blades[cursor].tasks = t.blades[cursor].tasks[:0]
+	t.blades[cursor].mu.Unlock()
+}
+
+func (t *Turbine) TasksCount() uint64 {
+	return atomic.LoadUint64(&t.tasksCounter)
 }
