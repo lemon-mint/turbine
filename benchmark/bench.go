@@ -2,15 +2,26 @@ package main
 
 import (
 	"fmt"
+	"runtime"
 	"sync"
 	"time"
 
 	"github.com/lemon-mint/turbine"
 )
 
+var t = turbine.NewTurbine(time.Millisecond*50, 1000)
+
 func main() {
+	// LOCK_OS_THREAD
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+
+	// Preheat the CPU
+	BenchmarkTurbine(100000)
+	BenchmarkTimeAfter(100000)
+
 	for i := 0; i < 3; i++ {
-		const N = 10000000
+		const N = 5000000
 		fmt.Print("BenchmarkTurbine\t1\t")
 		now := time.Now()
 		BenchmarkTurbine(N)
@@ -23,7 +34,6 @@ func main() {
 }
 
 func BenchmarkTurbine(n int) {
-	t := turbine.NewTurbine(time.Millisecond*50, 1000)
 	t.Start()
 	var wg sync.WaitGroup
 	for i := 0; i < n; i++ {
