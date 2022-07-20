@@ -22,10 +22,12 @@ type Turbine struct {
 	cursor       uint64
 	tasksCounter uint64
 
-	TaskRunner func(f func())
+	TaskRunner func(t int64, f func())
 
 	unit  time.Duration
 	state TurbineState
+
+	periodicTasks []task
 }
 
 func (t *Turbine) getState() TurbineState {
@@ -50,7 +52,7 @@ type blade struct {
 	tasks []task
 }
 
-type taskType uint8
+type taskType uint16
 
 const (
 	taskTypeAfter = iota
@@ -58,8 +60,9 @@ const (
 )
 
 type task struct {
-	t  int64 // time.Now().UnixNano()
-	fn func()
+	t     int64 // time.Now().UnixNano()
+	after int64
+	fn    func()
 
 	tt taskType
 }
@@ -83,6 +86,10 @@ func NewTurbine(unit time.Duration, blades int) *Turbine {
 
 var ErrOutOfRange = errors.New("out of range")
 
+func (t *Turbine) calcBlade(after time.Duration) int {
+	return int(t.loadCursor()+uint64(after/t.unit)) % len(t.blades)
+}
+
 func (t *Turbine) Schedule(after time.Duration, f func()) error {
 	if after < t.unit {
 		return ErrOutOfRange
@@ -93,14 +100,36 @@ func (t *Turbine) Schedule(after time.Duration, f func()) error {
 	}
 
 	atomic.AddUint64(&t.tasksCounter, 1)
-	targetBlade := int(t.loadCursor()+uint64(after/t.unit)) % len(t.blades)
+	targetBlade := t.calcBlade(after)
 	at := task{
-		t:  time.Now().UnixNano(),
-		fn: f,
-		tt: taskTypeAfter,
+		t:     time.Now().UnixNano(),
+		fn:    f,
+		tt:    taskTypeAfter,
+		after: int64(after),
 	}
 	t.blades[targetBlade].load(at)
 
+	return nil
+}
+
+func (t *Turbine) Every(period time.Duration, f func()) error {
+	if period < t.unit {
+		return ErrOutOfRange
+	}
+
+	if period > t.unit*time.Duration(len(t.blades)-1) {
+		return ErrOutOfRange
+	}
+
+	atomic.AddUint64(&t.tasksCounter, 1)
+	targetBlade := t.calcBlade(period)
+	at := task{
+		t:     time.Now().UnixNano(),
+		fn:    f,
+		tt:    taskTypePeriodic,
+		after: int64(period),
+	}
+	t.blades[targetBlade].load(at)
 	return nil
 }
 
@@ -158,12 +187,37 @@ func (t *Turbine) update() {
 		}
 	} else {
 		for i := range tasks {
-			t.TaskRunner(tasks[i].fn)
+			t.TaskRunner(tasks[i].t+tasks[i].after, tasks[i].fn)
 		}
 	}
 	atomic.AddUint64(&t.tasksCounter, ^uint64(len(t.blades[cursor].tasks)-1))
 	t.blades[cursor].tasks = t.blades[cursor].tasks[:0]
+	t.periodicTasks = t.periodicTasks[:0]
+	for i := range tasks {
+		switch tasks[i].tt {
+		case taskTypePeriodic:
+			t.periodicTasks = append(t.periodicTasks, tasks[i])
+		}
+	}
 	t.blades[cursor].mu.Unlock()
+
+	// Reschedule periodic tasks
+	now := time.Now().UnixNano()
+	for i := range t.periodicTasks {
+		last := t.periodicTasks[i].t
+		t.periodicTasks[i].t = now
+		diff := now - last - t.periodicTasks[i].after
+		diff = diff / 2
+		if (diff > 0 && diff < t.unit.Nanoseconds()) || (diff < 0 && -diff < t.unit.Nanoseconds()) {
+			diff = 0 // set diff to 0 if abs(diff) < t.unit
+		}
+		after := time.Duration(t.periodicTasks[i].after - diff)
+		if time.Duration(after) < t.unit {
+			after = t.unit
+		}
+		targetBlade := t.calcBlade(after)
+		t.blades[targetBlade].load(t.periodicTasks[i])
+	}
 }
 
 func (t *Turbine) TasksCount() uint64 {
